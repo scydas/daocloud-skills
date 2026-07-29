@@ -5,7 +5,9 @@ description: >
   troubleshoot a Kubernetes cluster managed by the DCE/kpanda module. Covers
   cluster health overview, node status, abnormal Pods, events, cluster
   unavailability, node NotReady, pending or failed Pods, and Chinese requests
-  like 集群巡检、集群体检、检查集群健康状态、排查集群异常、查看集群状态.
+  like 集群巡检、集群体检、检查集群健康状态、排查集群异常、查看集群状态. Use
+  `container-management:pod-diagnosis` when the cluster, namespace, and one
+  Pod are already known.
 ---
 
 # Kpanda Cluster Diagnosis
@@ -14,27 +16,42 @@ Diagnose cluster health through a standardized 4-step inspection workflow.
 
 **REQUIRED SUB-SKILL:** Use `dce` for all command execution, auth checks, and catalog discovery.
 
-## Workflow
+## Collection Flow
 
-### Step 1 — Cluster Overview
+### Step 1 — Resolve Scope and Cluster Overview
+- This skill triages a cluster-wide or unknown-scope symptom. If the user has
+  already identified one `cluster` / `namespace` / `pod`, hand off to
+  `container-management:pod-diagnosis` instead of re-running broad discovery.
+- If the cluster is unknown, list clusters, ask the user to choose one, then
+  stop this flow until the choice is resolved.
 - `dce container-management cluster get-cluster --name <cluster> -o json`
 - Verify cluster exists and status is Running. If not, report immediately.
 
 ### Step 2 — Node Health
-- `dce container-management core list-nodes --cluster <cluster> -o json`
+- `dce container-management core list-nodes --cluster <cluster> --all -o json`
 - Flag NotReady, Cordoned, or pressured nodes. Continue regardless.
 
-### Step 3 — Abnormal Pod Discovery
-- `dce container-management core list-pods --cluster <cluster> -o json`
-- Find Pods not in Running/Succeeded. Collect by namespace. If none, skip Step 4.
+### Step 3 — Bounded Abnormal Pod Discovery
+- `dce container-management core list-cluster-pods --cluster <cluster> --all -o json`
+- Select candidates from composite `ERROR` / `WAITING` status, terminal
+  `Failed` / `Unknown` phase, or non-ready/restarting container state. Do not
+  treat `Running` as healthy without checking container state.
+- Rank the candidates by impact, then select at most three for deep diagnosis.
+  If none are found, report the healthy inventory and skip Step 4.
 
-### Step 4 — Deep Diagnosis
-- `dce container-management core list-cluster-events --cluster <cluster> -o json`
+### Step 4 — Targeted Evidence for Selected Pods
+For each selected Pod only:
+
+- `dce container-management core list-cluster-events --cluster <cluster> --kind Pod --name <pod> --all -o json`
 - `dce container-management core get-pod --cluster <cluster> --namespace <ns> --name <pod> -o json`
-- Correlate events with Pod states to infer root cause.
+- When matching cluster-wide events, retain only records whose involved-object
+  namespace matches `<ns>`; a Pod name can exist in more than one namespace.
+- Correlate event, Pod, and node evidence. State when the evidence is
+  insufficient rather than inferring a root cause.
 
 ## User omitted cluster name
-Run `dce container-management cluster list-clusters -o json`, present list, ask user to pick one.
+Run `dce container-management cluster list-clusters --all -o json`, present a
+bounded choice list, and ask the user to pick one.
 
 ## Auth not established
 Stop and instruct user to run `dce auth login --hostname <host>`.
@@ -77,9 +94,11 @@ under this section, such as:
 
 ## Main Findings
 
-Use a numbered list with 2-3 findings. Each finding must explain the impact.
-Do not collapse multiple independent cluster risks into one generic finding; if
-nodes, Pods, and events point to different risks, keep them distinct.
+Use a numbered list only for independent findings. Each finding must explain
+the impact. Do not invent findings to reach a target count; if the cluster is
+healthy, say so directly. Do not collapse multiple independent cluster risks
+into one generic finding; if nodes, Pods, and events point to different risks,
+keep them distinct.
 
 ## Cause Analysis
 

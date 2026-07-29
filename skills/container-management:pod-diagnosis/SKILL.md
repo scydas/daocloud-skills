@@ -6,7 +6,8 @@ description: >
   Kubernetes cluster managed by the DCE/kpanda module. Also use for Chinese
   requests like 排查 Pod 故障原因、某个 pod 异常、pod 启动失败、pod 无法运行、
   pod 一直重启、CrashLoopBackOff、OOMKilled、ImagePullBackOff、Pending、Evicted、
-  or Terminating.
+  or Terminating. Use `container-management:cluster-diagnosis` instead for a
+  cluster-wide symptom or when no individual Pod has been identified yet.
 ---
 
 # Kpanda Pod Diagnosis
@@ -15,42 +16,64 @@ Diagnose unhealthy or failing pods through a standardized inspection workflow.
 
 **REQUIRED SUB-SKILL:** Use `dce` for all command execution, auth checks, and catalog discovery.
 
-## Workflow
+## Collection Flow
 
-### Step 1 — Identify Target Pods
-Run `dce container-management core list-cluster-pods --cluster <cluster> -o json` to list all pods.
-Filter for non-Running/Completed phases:
-- `Pending` — scheduling or resource issues
-- `Failed` — terminal crash
-- `Unknown` — control plane communication failure
-- `Evicted` — preemption or node pressure
-- CrashLoopBackOff / OOMKilled — visible in container states
+### Step 1 — Resolve One Exact Target and Capture Its Snapshot
+- This skill diagnoses one exact `cluster` / `namespace` / `pod` target. When
+  all three are known, call the following command once; do not first scan the
+  entire cluster:
 
-### Step 2 — Collect Pod Events
-For each problematic pod:
-- `dce container-management core list-events --cluster <cluster> --namespace <namespace> --kind Pod --name <pod> -o json`
-- `dce container-management core list-cluster-events --cluster <cluster> --kind Pod --name <pod> -o json`
-- `dce container-management core get-pod --cluster <cluster> --namespace <namespace> --name <pod> -o json`
+  `dce container-management core get-pod --cluster <cluster> --namespace <namespace> --name <pod> -o json`
 
-### Step 3 — Retrieve Container Logs
-- `dce container-management insight get-pod-container-log --cluster <cluster> --namespace <namespace> --name <pod> --container <container> -o json`
+- If only the namespace is missing, resolve it with
+  `dce container-management core list-cluster-pods --cluster <cluster> --name <pod> --all -o json`, require an exact-name match, and ask the user to choose when more than one namespace matches.
+- If the Pod name is missing, present a bounded candidate list and require the
+  user to select one before diagnosis. `Pending`, `Failed`, `Unknown`, or
+  non-ready/restarting container state are candidates; `Succeeded` is terminal
+  rather than `Completed`, and CrashLoopBackOff can still have `Running` phase.
+- If the target does not exist, report that result and stop. Do not silently
+  substitute another Pod.
+
+### Step 2 — Collect Targeted Pod Events
+- `dce container-management core list-events --cluster <cluster> --namespace <namespace> --kind Pod --kind-name <pod> --all -o json`
+- The namespaced query is the default evidence source: `--kind-name` filters
+  the involved Pod. Do not use `--name` here; it fuzzy-matches the Event name.
+- Only if the namespaced endpoint cannot provide the needed evidence, use the
+  cluster-wide fallback
+  `dce container-management core list-cluster-events --cluster <cluster> --kind Pod --name <pod> --all -o json`
+  and retain only results in `<namespace>`. Do not run both event queries by
+  default.
+
+### Step 3 — Retrieve Bounded Logs from Relevant Containers
+- Select only failing, recently restarted, or non-ready containers from the
+  Step 1 snapshot.
+- `dce container-management insight get-pod-container-log --cluster <cluster> --namespace <namespace> --name <pod> --container <container> --page-size <bounded-page-size> -o json`
+- Use an explicit recent time window when available and inspect only the needed
+  pages. Do not dump all historical logs.
 - Check for stack traces, OOM signals, exit codes, or missing dependencies.
 
 ### Step 4 — Inspect Related Workloads
 If the pod is owned by a controller:
-- `dce container-management core list-pods --cluster <cluster> --namespace <namespace> --kind <owner-kind> --name <owner-name> -o json`
-- Check replica counts, restart counts, and selector mismatches.
+- `dce container-management core list-pods --cluster <cluster> --namespace <namespace> --kind <owner-kind> --kind-name <owner-name> --all -o json`
+- Use only owner kinds supported by this command's catalog. This returns
+  related Pods and can compare restart/readiness patterns; it cannot by itself
+  prove a controller's desired replica count or selector mismatch.
 
 ### Step 5 — Node Affinity and Resource Analysis
-- `dce container-management core list-pods-by-node --cluster <cluster> --node <node> -o json`
-- `dce container-management core get-pod --cluster <cluster> --namespace <namespace> --name <pod> -o json`
-- Check tolerations, node selectors, affinity rules, and resource limits.
+- Only for a scheduled Pod with `<node>`:
+  - `dce container-management core get-node --cluster <cluster> --name <node> -o json`
+  - `dce container-management core list-pods-by-node --cluster <cluster> --node <node> --all -o json`
+- Compare the Pod's tolerations, node selectors, affinity rules, and resource
+  requests/limits with the returned node evidence. A Pending Pod without a
+  node cannot establish node pressure or affinity failure from these calls
+  alone; state the limit and rely on Pod events/spec evidence.
 
 ## User omitted cluster name
-Run `dce container-management cluster list-clusters -o json`, present list, ask user to pick one.
+Run `dce container-management cluster list-clusters --all -o json`, present a
+bounded choice list, and ask the user to pick one.
 
 ## User omitted pod name
-Run `dce container-management core list-cluster-pods --cluster <cluster> -o json`, present list filtered by non-Running phases, ask user to pick one.
+Run `dce container-management core list-cluster-pods --cluster <cluster> --all -o json`, present a bounded candidate list using composite status and container state rather than phase alone, and ask the user to pick one.
 
 ## Auth not established
 Stop and instruct user to run `dce auth login --hostname <host>`.
@@ -94,9 +117,10 @@ detail tables under this section, such as:
 
 ## Main Findings
 
-Use a numbered list with 2-3 findings. Each finding must explain the impact.
-Do not omit the decisive evidence: include the event reason, container state,
-exit code, or log signal that supports each finding.
+Use a numbered list only for independent findings. Each finding must explain
+the impact. Do not invent findings to reach a target count. Do not omit the
+decisive evidence: include the event reason, container state, exit code, or
+log signal that supports each finding.
 
 ## Cause Analysis
 
